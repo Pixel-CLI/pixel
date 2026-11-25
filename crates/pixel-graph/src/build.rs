@@ -188,7 +188,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    keeps its own row under `<uid>~2` ([`symbol_uids`]) instead of
 ///    replacing the first, so no edge or unresolved call is left on a missing
 ///    symbol id (#1217).
-pub const EXTRACTOR_VERSION: &str = "31";
+/// 32: a Go call through a package name (`daemon.Run()`) links the function
+///    of the directory an import of the calling file ends with, at
+///    `Probable`, where several packages define the name (#1456).
+pub const EXTRACTOR_VERSION: &str = "32";
 
 /// True iff the graph's rows were written by the current extractor, from
 /// the Rust and Ruby sources the switches ask for now

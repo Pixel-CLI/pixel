@@ -12,6 +12,7 @@ mod concept_engine1_audit;
 mod concept_tests;
 mod crux_lines;
 mod env_read_concepts;
+mod go_package_calls;
 mod graph_shadow;
 mod graph_source_switch;
 mod import_resolution;

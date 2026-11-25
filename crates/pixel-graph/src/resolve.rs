@@ -191,6 +191,11 @@ pub struct ResolveIndex {
     /// root (`rust_crate_depth`, `None` outside `src/`), for the module-path
     /// receiver rule (`module_match`).
     rust_modules: HashMap<i64, (Vec<String>, Option<usize>)>,
+    /// file_id → the directory of every Go file and whether it is a
+    /// `_test.go` one, for the package receiver rule (`go_package_match`).
+    go_files: HashMap<i64, (String, bool)>,
+    /// file_id → the import paths a Go file states, as written.
+    go_imports: HashMap<i64, Vec<String>>,
     /// The graph's Rust edges are pixel-mvp's (`mvp_adapter::rust_is_walled`).
     walled: bool,
     /// Every name some symbol carries, whatever its kind or language
@@ -248,6 +253,31 @@ impl ResolveIndex {
             })?;
             rows.collect::<Result<HashMap<_, _>, _>>()?
         };
+        let go_files = {
+            let mut stmt = conn.prepare("SELECT id, path FROM files WHERE lang = 'go'")?;
+            let rows = stmt.query_map([], |row| {
+                let path = row.get::<_, String>(1)?;
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    (
+                        go_directory(&path).to_string(),
+                        path.ends_with(GO_TEST_SUFFIX),
+                    ),
+                ))
+            })?;
+            rows.collect::<Result<HashMap<_, _>, _>>()?
+        };
+        let mut go_imports: HashMap<i64, Vec<String>> = HashMap::default();
+        {
+            let mut stmt = conn.prepare("SELECT file_id, spec FROM imports")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (file_id, spec) = row?;
+                if go_files.contains_key(&file_id) {
+                    go_imports.entry(file_id).or_default().push(spec);
+                }
+            }
+        }
         let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::default();
         let mut qualified_of: HashMap<i64, String> = HashMap::default();
         let mut containers = HashSet::default();
@@ -333,6 +363,8 @@ impl ResolveIndex {
             qualified_of,
             import_bindings,
             rust_modules,
+            go_files,
+            go_imports,
             walled,
             carried,
             bound,
@@ -444,7 +476,8 @@ impl ResolveIndex {
     ///   type, so `Options::default()` can only call `Options`'s `Default`
     ///   impl. Outside the shadow case it only fires where the name tiers
     ///   refused (`Unresolved`), so an import-resolved `Exact` target is never
-    ///   second-guessed.
+    ///   second-guessed. A Rust module path (`module_match`) and a Go package
+    ///   name (`go_package_match`) name their function the same way.
     /// - `sole-local-method`: when the graph holds exactly one callable
     ///   definition of `name`, it sits in the caller's own file, it is an
     ///   inherent method, and the receiver text is a value/path rather than a
@@ -745,7 +778,8 @@ impl ResolveIndex {
     /// The candidate a receiver names: the method of the type it ends with
     /// (`qualified_match`), else, for a path call (`util::run()`, never the
     /// method call `util.run()`, which calls a method of the value `util`),
-    /// the free function of the module it spells (`module_match`).
+    /// the free function of the module it spells (`module_match`), else the
+    /// function of the Go package it names (`go_package_match`).
     fn receiver_match(
         &self,
         caller_file_id: i64,
@@ -753,11 +787,56 @@ impl ResolveIndex {
         name: &str,
         method_call: bool,
     ) -> Option<i64> {
-        self.qualified_match(receiver, name).or_else(|| {
-            (!method_call)
-                .then(|| self.module_match(caller_file_id, receiver, name))
-                .flatten()
-        })
+        self.qualified_match(receiver, name)
+            .or_else(|| {
+                (!method_call)
+                    .then(|| self.module_match(caller_file_id, receiver, name))
+                    .flatten()
+            })
+            .or_else(|| self.go_package_match(caller_file_id, receiver, name))
+    }
+
+    /// The sole function `name` of the Go package the receiver names: in
+    /// `daemon.Run()`, a [qualified identifier](https://go.dev/ref/spec#Qualified_identifiers)
+    /// reads `Run` from the package block of an imported package. The
+    /// package is the directory an import of the calling file ends with
+    /// (`example.com/app/internal/daemon` is `internal/daemon`: the module
+    /// path in front is not in the graph), the longest one when several
+    /// directories holding a `name` end it. Only a function matches, never
+    /// a method, and never one declared in a `_test.go` file, which no
+    /// other package can import.
+    ///
+    /// `None` when the caller is not a Go file, no import ends with the
+    /// receiver, or the directory holds two functions of the name
+    /// (build-constrained twins: the graph cannot tell which one a build
+    /// keeps). An import under another name (`d "…/daemon"`) is not
+    /// followed: the extractor records no alias. The caller turns the hit
+    /// into `Probable`: a local variable named like the package shadows it,
+    /// which no row records.
+    fn go_package_match(&self, caller_file_id: i64, receiver: &str, name: &str) -> Option<i64> {
+        let imports = self.go_imports.get(&caller_file_id)?;
+        let package = receiver.trim();
+        let in_package: Vec<(usize, i64)> = self
+            .by_name
+            .get(name)?
+            .iter()
+            .filter(|cand| cand.kind == SymbolKind::Function)
+            .filter_map(|cand| {
+                let (directory, test) = self.go_files.get(&cand.file_id)?;
+                (!test
+                    && imports
+                        .iter()
+                        .any(|import| go_import_names(import, package, directory)))
+                .then_some((directory.len(), cand.symbol_id))
+            })
+            .collect();
+        let longest = in_package.iter().map(|(length, _)| *length).max()?;
+        let mut hits = in_package
+            .iter()
+            .filter(|(length, _)| *length == longest)
+            .map(|(_, id)| *id);
+        let first = hits.next()?;
+        hits.next().is_none().then_some(first)
     }
 
     /// The sole free function `name` defined in the Rust file whose module
@@ -964,6 +1043,28 @@ fn rust_crate_depth(path: &str) -> Option<usize> {
     let package = usize::from(src > 0);
     let binary = parts.len() > src + 2 && parts[src + 1] == "bin";
     Some(package + if binary { 2 } else { 0 })
+}
+
+/// The suffix of a Go test file: its declarations are compiled for
+/// `go test` only, so no other package reaches them.
+const GO_TEST_SUFFIX: &str = "_test.go";
+
+/// The directory of a repository-relative `path`, empty at the root.
+fn go_directory(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(directory, _)| directory)
+}
+
+/// True iff the Go import path `import` names the package `package` kept
+/// in `directory`: the path's last element is the package name, and the
+/// path ends with the whole directory (`example.com/app/internal/daemon`
+/// with `internal/daemon` or `app/internal/daemon`, never `nal/daemon`). A
+/// root-level package has an empty directory: the whole path is then what
+/// stands in front of it, which never ends on a `/`, so it is never named.
+fn go_import_names(import: &str, package: &str, directory: &str) -> bool {
+    import.rsplit('/').next() == Some(package)
+        && import
+            .strip_suffix(directory)
+            .is_some_and(|front| front.is_empty() || front.ends_with('/'))
 }
 
 /// A Rust method call's receiver, as the extractor records it: the value's
@@ -1968,6 +2069,149 @@ mod tests {
             !ends_with_path(&module, &[]),
             "an empty path names no module"
         );
+    }
+
+    /// `Run` across Go packages: a call through a package name picks the
+    /// function of the directory an import of the caller ends with, the
+    /// longest when two end it, and nothing when the package is not
+    /// imported, holds two functions of the name, or the caller is not Go.
+    /// A method and a `_test.go` function beside the pick never compete.
+    #[test]
+    fn go_package_match_picks_the_function_of_the_imported_directory() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let mut go = |path: &str| store.replace_file(path, path, "go").unwrap();
+        let main = go("cmd/app/main.go");
+        let elsewhere = go("cmd/tool/main.go");
+        let exact = go("cmd/exact/main.go");
+        let daemon = go("internal/daemon/cli.go");
+        let daemon_type = go("internal/daemon/daemon.go");
+        let daemon_test = go("internal/daemon/cli_test.go");
+        let top = go("daemon/top.go");
+        let start = go("internal/start/start.go");
+        let worker = go("internal/worker/worker.go");
+        let twin_a = go("internal/twin/a.go");
+        let twin_b = go("internal/twin/b.go");
+        let ts = store
+            .replace_file("web/main.ts", "web/main.ts", "typescript")
+            .unwrap();
+        let daemon_run = insert(&store, daemon, "internal/daemon/cli.go", "Run");
+        let top_run = insert(&store, top, "daemon/top.go", "Run");
+        let start_run = insert(&store, start, "internal/start/start.go", "Run");
+        insert(&store, daemon_test, "internal/daemon/cli_test.go", "Run");
+        insert(&store, worker, "internal/worker/worker.go", "Run");
+        insert(&store, twin_a, "internal/twin/a.go", "Run");
+        insert(&store, twin_b, "internal/twin/b.go", "Run");
+        insert(&store, exact, "cmd/exact/main.go", "Run");
+        store
+            .insert_symbol(
+                daemon_type,
+                "internal/daemon/daemon.go#Daemon.Run#method",
+                "Run",
+                "Daemon.Run",
+                SymbolKind::Method,
+                1,
+                3,
+                "",
+            )
+            .unwrap();
+        for (file, spec) in [
+            (main, "example.com/app/internal/daemon"),
+            (main, "example.com/app/internal/start"),
+            (main, "example.com/app/internal/twin"),
+            (main, "fmt"),
+            // `internal/daemon` ends this path as text, not as a directory.
+            (elsewhere, "example.com/xinternal/daemon"),
+            // The path is the directory itself.
+            (exact, "internal/start"),
+            (exact, "example.com/app/internal/daemon"),
+            (ts, "example.com/app/internal/daemon"),
+        ] {
+            store.insert_import(file, spec, None, &[]).unwrap();
+        }
+        let idx = ResolveIndex::build(&store).unwrap();
+        let cases = [
+            (main, "daemon", Some(daemon_run)),
+            (main, " daemon ", Some(daemon_run)),
+            (main, "start", Some(start_run)),
+            (main, "twin", None),
+            (main, "worker", None),
+            (main, "fmt", None),
+            (main, "app.daemon", None),
+            (elsewhere, "daemon", Some(top_run)),
+            (elsewhere, "start", None),
+            (exact, "start", Some(start_run)),
+            (ts, "daemon", None),
+        ];
+        for (caller, receiver, want) in cases {
+            assert_eq!(
+                idx.go_package_match(caller, receiver, "Run"),
+                want,
+                "{receiver} from file {caller}"
+            );
+        }
+        assert_eq!(
+            idx.go_package_match(main, "daemon", "Stop"),
+            None,
+            "no function of that name"
+        );
+        // Two packages define `Run`, so the name tiers refuse: the receiver
+        // decides, at Probable. A caller defining its own `Run` is not the
+        // callee of `daemon.Run()`.
+        assert_eq!(
+            idx.decide_at(main, "Run", Some("daemon"), 9),
+            Decision::Probable(daemon_run)
+        );
+        assert_eq!(
+            idx.decide_at(exact, "Run", Some("daemon"), 9),
+            Decision::Probable(daemon_run)
+        );
+        assert_eq!(
+            idx.decide_at(main, "Run", Some("worker"), 9),
+            Decision::Unresolved
+        );
+    }
+
+    #[test]
+    fn go_import_names_reads_the_last_element_and_whole_directories() {
+        let cases = [
+            (
+                "example.com/app/internal/daemon",
+                "daemon",
+                "internal/daemon",
+                true,
+            ),
+            ("example.com/app/internal/daemon", "daemon", "daemon", true),
+            ("internal/daemon", "daemon", "internal/daemon", true),
+            (
+                "example.com/app/internal/daemon",
+                "daemon",
+                "nal/daemon",
+                false,
+            ),
+            (
+                "example.com/app/internal/daemon",
+                "internal",
+                "internal/daemon",
+                false,
+            ),
+            (
+                "example.com/app/internal/daemon",
+                "daemon",
+                "internal/start",
+                false,
+            ),
+            ("example.com/app/internal/daemon", "daemon", "", false),
+            ("daemon", "daemon", "", false),
+        ];
+        for (import, package, directory, want) in cases {
+            assert_eq!(
+                go_import_names(import, package, directory),
+                want,
+                "{import} names {package} in {directory:?}"
+            );
+        }
+        assert_eq!(go_directory("internal/daemon/cli.go"), "internal/daemon");
+        assert_eq!(go_directory("main.go"), "");
     }
 
     /// `is_test_path` in three files, one of them a method: the module path
