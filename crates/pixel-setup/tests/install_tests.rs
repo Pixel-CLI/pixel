@@ -240,6 +240,74 @@ fn global_install_registers_only_task_hooks_for_claude_and_codex() {
 // doctor tests
 // ---------------------------------------------------------------------------
 
+/// What earlier releases wrote stays in place (#965), so doctor is the only
+/// thing that tells a user it is there: yellow, each file and entry named,
+/// no repair command; green once the user deleted them.
+#[test]
+fn doctor_names_what_an_earlier_release_left_and_offers_no_repair() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    let leftovers = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            only: vec!["install.leftovers".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.leftovers").clone()
+    };
+    let clean = leftovers();
+    assert_eq!(clean.status, CheckStatus::Green, "{clean:?}");
+    assert_eq!(clean.detail, None);
+
+    let settings = home.join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        &settings,
+        r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"'/home/dev/.local/bin/pixel' run-hook prompt-submit --provider claude","timeout":10}]}]}}"#,
+    )
+    .unwrap();
+    let config = home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let block = format!("{MANAGED_BEGIN}\n# Pixel Retrieval Layer\n{MANAGED_END}");
+    fs::write(
+        &config,
+        format!("developer_instructions = '''\n{block}\n'''\n"),
+    )
+    .unwrap();
+
+    let found = leftovers();
+    assert_eq!(found.status, CheckStatus::Yellow, "{found:?}");
+    assert_eq!(found.fix, None, "no command removes a leftover");
+    let hooks =
+        "1 retired hook(s) this binary ignores: UserPromptSubmit→prompt-submit --provider claude";
+    let instructions = format!(
+        "a {MANAGED_BEGIN} block of {} bytes in `developer_instructions`, read by Codex in every session",
+        block.len()
+    );
+    assert_eq!(
+        found.summary,
+        format!(
+            "left by an earlier release, unused by this one and not removed by `pixel setup`; delete by hand — {}: {hooks}; {}: {instructions}",
+            settings.display(),
+            config.display()
+        )
+    );
+    assert_eq!(
+        found.detail,
+        Some(serde_json::json!({"leftovers": [
+            {"path": settings.display().to_string(), "what": hooks},
+            {"path": config.display().to_string(), "what": instructions},
+        ]}))
+    );
+
+    fs::remove_file(&settings).unwrap();
+    fs::remove_file(&config).unwrap();
+    assert_eq!(leftovers().status, CheckStatus::Green);
+}
+
 #[test]
 fn doctor_runs_and_returns_report() {
     let dir = TempDir::new().expect("tempdir");

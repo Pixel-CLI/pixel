@@ -1,0 +1,1 @@
+**doctor:** `pixel doctor` has a new check, `install.leftovers`, yellow when an earlier release left retired hooks in the Claude, Devin or Codex hook files, or its instruction block in Codex's `developer_instructions` or Pi's `APPEND_SYSTEM.md`. It names each file and entry; `pixel setup` still does not remove them, so deleting them is a manual edit.
