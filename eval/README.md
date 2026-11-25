@@ -106,7 +106,8 @@ results/
   scores.json            one row per run (score.py)
 ```
 
-A row that cannot be measured stays `null`: Codex reports no cost, a
+A row that cannot be measured stays `null`: a model with no listed price in
+`lib/usage.py` has no cost (Codex reports token counts only), a
 transcript without usage has no token counts, and `report.py` counts a pair
 with an unknown quality as `unknown`, never as a tie.
 
