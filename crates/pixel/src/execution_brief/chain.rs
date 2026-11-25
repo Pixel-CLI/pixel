@@ -4654,6 +4654,8 @@ mod tests {
             "<task-notification><task-id>x</task-id>fetchUser retry_count failed</task-notification>",
             "<system-reminder>callers of `fetchUser`</system-reminder>",
             "<command-name>/review</command-name> `fetchUser`",
+            "<ci-monitor-event>CI failed on `fetchUser`</ci-monitor-event>",
+            "<create-pr-command>open a PR for `fetchUser`</create-pr-command>",
             delegation.as_str(),
             reply.as_str(),
             reminded.as_str(),

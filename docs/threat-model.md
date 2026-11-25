@@ -121,7 +121,10 @@ embed the repository by sending it, which it could do with `search`.
 `pixel run-hook task-event` reads one JSON payload from the agent host on
 stdin (ARCHITECTURE.md, hook table). The payload's `cwd`, `tool_input` and
 session fields are agent-controlled. `task-event` gates edits and completion for a task contract and, on
-`prompt-submit`, returns the bounded `[PIXEL:BRIEF]` evidence block. It never
+`prompt-submit`, returns the bounded `[PIXEL:BRIEF]` evidence block. On
+`post-tool-use` it reads the words of a finished search command
+(`execution_brief/graph_hint.rs`) to name symbols, and returns their graph
+definitions and callers as a `[PIXEL:GRAPH]` block. It never
 executes `tool_input.command` and never rewrites or approves a command.
 
 The verbs earlier releases registered (`guard`, `composed-guard`,
@@ -768,7 +771,11 @@ stays so references to the later threats hold.
 - **Scenario**: a repository plants instructions in code, comments, commit
   messages, symbol names or file names; Pixel quotes them to the agent, which
   follows them.
-- **Mitigation**: the one thing an install delivers to an agent unasked is
+- **Mitigation**: an install delivers two things to an agent unasked. The
+  `[PIXEL:GRAPH]` block of `task-event` on `post-tool-use` quotes only symbol
+  names, repository paths and line numbers from the graph (at most three
+  symbols, three definitions and eight callers each, 800 ms, off with
+  `PIXEL_BRIEF=0`), never source text. The other is
   the `[PIXEL:BRIEF]` block of `task-event` on `prompt-submit`: it quotes file
   paths, symbol names and a definition from the repository as evidence, capped
   at 2 KiB (`BRIEF_BYTES`), with a 3 s deadline (`brief_window_ms`, at most 4.5 s), off with `PIXEL_BRIEF=0`.

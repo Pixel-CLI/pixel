@@ -1197,9 +1197,32 @@ fn process(
         })
     } else {
         let decision = ledger();
-        (decision, finish_brief(provider, event, &payload, brief))
+        let text = finish_brief(provider, event, &payload, brief)
+            .or_else(|| tool_graph_hint(provider, event, &payload));
+        (decision, text)
     };
     envelope(provider, event, &with_context(decision, text))
+}
+
+/// The code graph's answer to a search the agent just ran, for Claude and
+/// Codex after a tool call; off wherever the brief is off.
+fn tool_graph_hint(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    payload: &Value,
+) -> Option<String> {
+    if event != TaskHookEvent::PostToolUse
+        || !matches!(provider, TaskProvider::Claude | TaskProvider::Codex)
+    {
+        return None;
+    }
+    let root = crate::discover_root(&payload_cwd(provider, payload)).ok()?;
+    if !crate::execution_brief::chain::Gate::read(&root).enabled {
+        return None;
+    }
+    let tool = string(payload, &["tool_name", "toolName"])?;
+    let input = payload.get("tool_input").or_else(|| payload.get("input"))?;
+    crate::execution_brief::graph_hint::for_tool_call(&root, tool, input)
 }
 
 /// Hook-sized parts the brief of this event may fill. A hook serving slice
