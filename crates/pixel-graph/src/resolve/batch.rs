@@ -26,16 +26,19 @@ use rusqlite::params;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use super::{
-    Candidate, ImportTarget, ResolveIndex, callable, ruby, rust_crate_depth, rust_module_path,
+    Candidate, GO_TEST_SUFFIX, ImportTarget, ResolveIndex, callable, go_directory, ruby,
+    rust_crate_depth, rust_module_path,
 };
 use crate::store::{GraphStore, StoreError, SymbolKind, decode_bindings, decode_scope};
 
 /// What a decision reads of a file other than the caller's: whether it is
-/// a Ruby file, and a Rust file's module path and crate depth.
+/// a Ruby file, a Rust file's module path and crate depth, and a Go file's
+/// directory with whether it is a `_test.go` one.
 #[derive(Debug, Clone)]
 struct FileFacts {
     ruby: bool,
     rust: Option<(Vec<String>, Option<usize>)>,
+    go: Option<(String, bool)>,
 }
 
 impl FileFacts {
@@ -43,6 +46,12 @@ impl FileFacts {
         Self {
             ruby: lang == "ruby",
             rust: (lang == "rust").then(|| (rust_module_path(path), rust_crate_depth(path))),
+            go: (lang == "go").then(|| {
+                (
+                    go_directory(path).to_string(),
+                    path.ends_with(GO_TEST_SUFFIX),
+                )
+            }),
         }
     }
 
@@ -52,6 +61,7 @@ impl FileFacts {
                 .rust
                 .as_ref()
                 .map_or(0, |(module, _)| module.iter().map(|s| s.len() + 24).sum())
+            + self.go.as_ref().map_or(0, |(directory, _)| directory.len())
     }
 }
 
@@ -229,6 +239,8 @@ impl BatchResolver {
             qualified_of: HashMap::default(),
             import_bindings: HashMap::default(),
             rust_modules: HashMap::default(),
+            go_files: HashMap::default(),
+            go_imports: HashMap::default(),
             walled: self.walled,
             carried: HashSet::default(),
             bound: HashSet::default(),
@@ -252,6 +264,10 @@ impl BatchResolver {
             if let Some(module) = facts.rust {
                 idx.rust_modules.insert(file_id, module);
             }
+            let go_caller = facts.go.is_some();
+            if let Some(go) = facts.go {
+                idx.go_files.insert(file_id, go);
+            }
             let mut stmt =
                 conn.prepare_cached("SELECT id, kind, qualified FROM symbols WHERE file_id = ?1")?;
             let mut rows = stmt.query(params![file_id])?;
@@ -266,10 +282,13 @@ impl BatchResolver {
                 idx.qualified_of.insert(id, row.get(2)?);
             }
             let mut stmt = conn.prepare_cached(
-                "SELECT resolved_file_id, bindings, scope FROM imports WHERE file_id = ?1",
+                "SELECT resolved_file_id, bindings, scope, spec FROM imports WHERE file_id = ?1",
             )?;
             let mut rows = stmt.query(params![file_id])?;
             while let Some(row) = rows.next()? {
+                if go_caller {
+                    idx.go_imports.entry(file_id).or_default().push(row.get(3)?);
+                }
                 let resolved: Option<i64> = row.get(0)?;
                 let bindings = decode_bindings(&row.get::<_, String>(1)?);
                 let scope = decode_scope(&row.get::<_, String>(2)?);
@@ -300,6 +319,9 @@ impl BatchResolver {
                         .entry(*file_id)
                         .or_insert_with(|| module.clone());
                 }
+                if let Some(go) = &facts.go {
+                    idx.go_files.entry(*file_id).or_insert_with(|| go.clone());
+                }
             }
             if !entry.candidates.is_empty() {
                 for (candidate, qualified) in &entry.candidates {
@@ -318,5 +340,30 @@ impl BatchResolver {
         }
         self.cache.trim();
         Ok(idx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cache bound counts what a fact holds on the heap: a Go file's
+    /// directory, a Rust file's module segments, nothing for the others.
+    #[test]
+    fn file_facts_should_count_the_bytes_their_strings_hold() {
+        let inline = std::mem::size_of::<FileFacts>();
+        let go = FileFacts::of("go", "internal/daemon/cli_test.go");
+        assert_eq!(go.go, Some(("internal/daemon".to_string(), true)));
+        assert_eq!(go.bytes(), inline + 15);
+        let rust = FileFacts::of("rust", "crates/pixel-rank/src/signals.rs");
+        assert_eq!(rust.go, None);
+        assert_eq!(rust.bytes(), inline + 10 + 24 + 7 + 24);
+        let ruby = FileFacts::of("ruby", "app/models/user.rb");
+        assert!(ruby.ruby);
+        assert_eq!(ruby.bytes(), inline);
+        assert_eq!(
+            FileFacts::of("go", "main.go").go,
+            Some((String::new(), false))
+        );
     }
 }

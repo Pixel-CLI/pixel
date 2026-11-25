@@ -1,0 +1,1 @@
+**graph:** a Go call through a package name (`daemon.Run()`) now links the function of the package its file imports when several packages define that name; `who-calls` and `impact` reported 0 callers for it. The edge is `Probable`, and existing graphs are rebuilt once.
