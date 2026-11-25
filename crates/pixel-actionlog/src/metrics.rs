@@ -7,6 +7,9 @@
 //! v2 adds the measured whole-file read: a command that stands in for reading
 //! one file (`list-signatures`) records that file's size as its known bytes and
 //! no native command, and the live line compares it with the answer on stdout.
+//! v3 adds the measured native output: a command whose answer is what one
+//! native command prints (`search-content` beside a grep) records the answer's
+//! size as the whole baseline, with no assumed file read, and claims no saving.
 //! No source, graph, or native comparison operation is performed here. Tokens are
 //! always UTF-8 bytes / 4, including the live reporting line when emitted.
 
@@ -18,8 +21,10 @@ use serde::{Deserialize, Serialize};
 use crate::ActionEvent;
 
 /// Version history: `workflow-v1` estimated every file at 4 KiB; `workflow-v2`
-/// records the measured size of the one file `list-signatures` stands in for.
-pub const ESTIMATOR_VERSION: &str = "workflow-v2";
+/// records the measured size of the one file `list-signatures` stands in for;
+/// `workflow-v3` records a search's own answer as its baseline, where v2
+/// assumed a 4 KiB read of every matched file the answer never replaced.
+pub const ESTIMATOR_VERSION: &str = "workflow-v3";
 pub const TIME_ESTIMATOR_VERSION: &str = "sequential-v1";
 pub const DEFAULT_ROUND_TRIP_MS: u64 = 2000;
 
@@ -87,11 +92,19 @@ pub struct WorkflowEvidence {
     pub relationships: u64,
     pub native_commands: u64,
     pub known_file_bytes: Option<u64>,
+    /// The measured size of the answer when one native command prints the
+    /// same output: the whole baseline, replacing every assumption above.
+    /// Absent on records written before `workflow-v3`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_output_bytes: Option<u64>,
     pub partial: bool,
 }
 
 impl WorkflowEvidence {
     pub fn estimated_bytes(&self) -> u64 {
+        if let Some(bytes) = self.native_output_bytes {
+            return bytes;
+        }
         self.known_file_bytes
             .unwrap_or_else(|| self.distinct_files.saturating_mul(4096))
             .saturating_add(
@@ -338,6 +351,12 @@ pub fn format_metrics_line(event: &ActionEvent) -> Option<String> {
             "{}{partial_tag}",
             measured_read_section(file_bytes, answer_bytes)
         )
+    } else if let Some(bytes) = metrics
+        .evidence
+        .as_ref()
+        .and_then(|evidence| evidence.native_output_bytes)
+    {
+        format!("{}{partial_tag}", same_output_section(bytes))
     } else if let Some(native_bytes) = metrics.native_workflow_bytes {
         let native_tok = native_bytes as f64 / 4.0;
         if native_tok > 0.0 {
@@ -392,6 +411,15 @@ fn measured_read_section(file_bytes: u64, answer_bytes: u64) -> String {
         Some(pct) => format!("{both} (-{pct}%)"),
         None => format!("{both} (no saving)"),
     }
+}
+
+/// The token row of an answer one native command prints as well: its size,
+/// and no saving, whatever the reporting block adds on top.
+fn same_output_section(bytes: u64) -> String {
+    format!(
+        "a native search returns the same output, {} tok (no saving)",
+        read_tokens(bytes)
+    )
 }
 
 /// Tokens a measured read counts for `bytes` of UTF-8: divided by four,
@@ -691,7 +719,7 @@ mod tests {
             .unwrap()
             .estimator_version = "sequential-v2".to_owned();
         let mut future_tokens = make(2000, false);
-        future_tokens.metrics.as_mut().unwrap().estimator_version = "workflow-v3".to_owned();
+        future_tokens.metrics.as_mut().unwrap().estimator_version = "workflow-v99".to_owned();
         let mut old_metrics = make(2000, false);
         old_metrics.metrics.as_mut().unwrap().time_estimate = None;
         let unavailable = ActionEvent::new("index", ".").with_metrics(OperationMetrics::new(
@@ -739,7 +767,7 @@ mod tests {
         assert!(
             groups
                 .iter()
-                .any(|group| group["token_estimator_version"] == "workflow-v3")
+                .any(|group| group["token_estimator_version"] == "workflow-v99")
         );
     }
 
@@ -962,7 +990,7 @@ mod tests {
             0,
             Some(WorkflowEvidence::default()),
         ));
-        future.metrics.as_mut().unwrap().estimator_version = "workflow-v3".to_owned();
+        future.metrics.as_mut().unwrap().estimator_version = "workflow-v99".to_owned();
         let summary = summarize_metrics(&[
             complete.clone(),
             complete,
@@ -985,7 +1013,7 @@ mod tests {
         assert!(v1["unavailable"]["estimated"]["saved_tokens"].is_null());
         assert_eq!(v1["unavailable"]["measured"]["output_bytes"], 120);
         assert_eq!(
-            summary["versions"]["workflow-v3"]["complete"]["estimated"]["saved_tokens"],
+            summary["versions"]["workflow-v99"]["complete"]["estimated"]["saved_tokens"],
             0.0
         );
     }
@@ -1271,6 +1299,86 @@ mod tests {
         assert_eq!(absent.comparison_gap, None);
     }
 
+    /// A measured native output is the whole baseline: it replaces the
+    /// assumed kilobyte per command and every assumed file read, so the
+    /// estimate is the answer's own size and never more.
+    #[test]
+    fn a_measured_native_output_is_the_whole_baseline() {
+        let evidence = WorkflowEvidence {
+            distinct_files: 3,
+            relationships: 2,
+            native_commands: 1,
+            known_file_bytes: Some(900),
+            native_output_bytes: Some(173),
+            partial: false,
+        };
+        assert_eq!(evidence.estimated_bytes(), 173);
+        let policy = WorkflowEvidence {
+            native_output_bytes: None,
+            ..evidence
+        };
+        assert_eq!(policy.estimated_bytes(), 3972); // 900 + 3 x 1024
+    }
+
+    /// The row under a search: what a grep would have printed too, in the
+    /// tokens of the answer, and no saving claimed. Under `workflow-v2` the
+    /// same 173-byte answer naming one file read "~1237 tok (97%) saved".
+    #[test]
+    fn the_live_line_of_a_search_claims_no_saving_over_a_native_search() {
+        let evidence = WorkflowEvidence {
+            native_commands: 1,
+            native_output_bytes: Some(173),
+            ..Default::default()
+        };
+        let mut metrics =
+            OperationMetrics::new(Duration::from_millis(12), 173, Some(evidence.clone()));
+        metrics.answer_bytes = Some(173);
+        assert_eq!(metrics.native_workflow_bytes, Some(173));
+        let event = ActionEvent::new("search-content", "login_user").with_metrics(metrics);
+        let line = format_metrics_line(&event).unwrap();
+        let rows = [
+            "  ├─ ⏱ no estimated time saving (baseline has no saved round trip)",
+            "  ├─ § a native search returns the same output, 43 tok (no saving)",
+            "",
+        ]
+        .join("\n");
+        assert!(line.contains(&rows), "{line}");
+        assert!(!line.contains("context saved"), "{line}");
+        assert!(!line.contains('%'), "{line}");
+
+        let mut partial = evidence;
+        partial.partial = true;
+        let mut metrics = OperationMetrics::new(Duration::from_millis(12), 173, Some(partial));
+        metrics.answer_bytes = Some(173);
+        let event = ActionEvent::new("search-content", "login_user").with_metrics(metrics);
+        assert!(
+            format_metrics_line(&event)
+                .unwrap()
+                .contains("43 tok (no saving), partial\n")
+        );
+    }
+
+    /// A record written before `workflow-v3` has no measured native output
+    /// and keeps the estimate it was written with; a record that measured
+    /// none does not serialize the field.
+    #[test]
+    fn older_evidence_reads_back_without_a_measured_native_output() {
+        let json = r#"{"distinct_files":1,"relationships":0,"native_commands":1,"known_file_bytes":null,"partial":false}"#;
+        let old: WorkflowEvidence = serde_json::from_str(json).unwrap();
+        assert_eq!(old.native_output_bytes, None);
+        assert_eq!(old.estimated_bytes(), 5120);
+        assert_eq!(serde_json::to_string(&old).unwrap(), json);
+        let measured = WorkflowEvidence {
+            native_output_bytes: Some(173),
+            ..old
+        };
+        assert!(
+            serde_json::to_string(&measured)
+                .unwrap()
+                .contains(r#""native_output_bytes":173"#)
+        );
+    }
+
     /// Only a baseline made of the file bytes alone is a measurement: an
     /// assumed kilobyte per command or relationship would turn the "full
     /// read" figure back into the policy estimate it replaces.
@@ -1281,6 +1389,7 @@ mod tests {
             native_commands,
             relationships,
             known_file_bytes,
+            native_output_bytes: None,
             partial: false,
         };
         assert_eq!(read(0, 0, Some(41_462)).measured_file_read(), Some(41_462));
