@@ -1,0 +1,1 @@
+**brief:** the Claude desktop app's `<ci-monitor-event>` and `<create-pr-command>` messages no longer get a brief: they are harness envelopes, not prompts, and drew 72 unrelated briefs in two months of Omni sessions.

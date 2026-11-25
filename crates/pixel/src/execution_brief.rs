@@ -17,6 +17,7 @@ pub(crate) mod feedback;
 mod french;
 mod gate_model;
 mod git_changes;
+pub(crate) mod graph_hint;
 mod graph_reads;
 pub(crate) mod intent;
 mod kinds;

@@ -1,0 +1,1 @@
+**brief:** a `grep`, `rg` or Grep call that names a symbol now gets that symbol's definitions and callers from the code graph in a `[PIXEL:GRAPH]` note after the search (Claude Code and Codex), so graph retrieval reaches the agent without a `pixel` command.

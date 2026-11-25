@@ -1201,3 +1201,113 @@ fn a_switched_on_classifier_should_decline_a_prompt_it_calls_none_and_only_then(
     assert!(delivered, "{decision}");
     assert_eq!(decision["judge"], Value::Null, "{decision}");
 }
+
+/// Load the daemon's graph with one lookup, as a session's earlier calls
+/// would: the hook's 800 ms window is for a warm daemon, not its first load.
+fn prime_graph(root: &Path) {
+    let lookup = pixel_command()
+        .current_dir(root)
+        .args(["find-symbol", "handleError", "--metrics", "off"])
+        .output()
+        .unwrap();
+    assert!(lookup.status.success(), "{lookup:?}");
+}
+
+/// Run `pixel daemon <verb>` for the fixture.
+fn daemon(root: &Path, verb: &str) -> std::process::Output {
+    pixel_command()
+        .current_dir(root)
+        .args(["daemon", verb, "--metrics", "off"])
+        .output()
+        .unwrap()
+}
+
+fn post_search(root: &Path, command: &str, env: &[(&str, &str)]) -> Value {
+    let payload = json!({
+        "session_id": "hint-session",
+        "cwd": root,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+        "tool_response": { "stdout": "", "stderr": "" },
+    });
+    run_hook(root, "claude", "post-tool-use", &payload, |command| {
+        command.env_remove("PIXEL_BRIEF");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+    })
+}
+
+#[test]
+fn a_search_naming_a_symbol_should_get_its_definition_and_callers_after_the_call() {
+    let root = indexed("graph-hint");
+    let started = daemon(&root, "start");
+    let up = wait_for_daemon(&root);
+    prime_graph(&root);
+    let hinted = post_search(
+        &root,
+        r#"cd apps && rtk grep -rn "handleError(\|Nope(" . | head"#,
+        &[],
+    );
+    let switched_off = post_search(&root, "rg -n handleError", &[("PIXEL_BRIEF", "0")]);
+    let filter = post_search(&root, "git log --oneline | grep handleError", &[]);
+    // Stop before any assertion so a red test never leaves a daemon behind.
+    let stopped = daemon(&root, "stop");
+    assert!(started.status.success(), "{started:?}");
+    assert!(up, "the daemon never answered");
+    assert!(stopped.status.success(), "{stopped:?}");
+    assert_eq!(hinted["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert_eq!(
+        context(&hinted),
+        [
+            "[PIXEL:GRAPH] Pixel's code graph already resolved the symbol(s) this search names. Use these definitions and call sites instead of searching for them again; read only the lines you need:",
+            "`handleError` defined: packages/ui/handleError.ts:1-3",
+            "  callers (2):",
+            "  Page apps/web/page.tsx:2-4 (call at line 3)",
+            "  Other apps/web/page.tsx:5-5 (call at line 5)",
+        ]
+        .join("\n")
+    );
+    for (case, output) in [("PIXEL_BRIEF=0", &switched_off), ("a filter grep", &filter)] {
+        assert!(
+            output
+                .pointer("/hookSpecificOutput/additionalContext")
+                .is_none(),
+            "{case}: {output}"
+        );
+    }
+    assert!(daemons_serving(&root).is_empty());
+}
+
+#[test]
+fn a_symbol_search_without_a_daemon_should_start_one_for_the_next_search() {
+    let root = indexed("graph-hint-warm");
+    let cache = Scratch::for_test("prompt-brief-cache", "graph-hint-warm");
+    let env = [
+        ("PIXEL_DAEMON_AUTO_START", "1"),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+    ];
+    assert!(!daemon_running(&root), "no daemon before the search");
+    let first = post_search(&root, "rg -n handleError .", &env);
+    let up = wait_for_daemon(&root);
+    let second = up.then(|| {
+        prime_graph(&root);
+        post_search(&root, "rg -n handleError .", &env)
+    });
+    // Stop before asserting: a failed assertion never leaves a daemon.
+    stop_daemon(&root);
+    assert!(
+        first
+            .pointer("/hookSpecificOutput/additionalContext")
+            .is_none(),
+        "no daemon answered the first search: {first}"
+    );
+    assert!(up, "the search started no daemon");
+    let second = second.unwrap();
+    assert!(
+        context(&second).starts_with("[PIXEL:GRAPH] Pixel's code graph already resolved"),
+        "{second}"
+    );
+    assert!(context(&second).contains("`handleError` defined: packages/ui/handleError.ts:1-3"));
+}

@@ -21,6 +21,9 @@ pub const ORCHESTRATOR_PREFIXES: &[&str] = &[
     "<command-message>",
     "<local-command",
     "<bash-input>",
+    // The Claude desktop app's pull-request monitor and its create-PR button.
+    "<ci-monitor-event>",
+    "<create-pr-command>",
     "<realtime_delegation",
     "<send_user_message_question_reply",
     "[SYSTEM NOTIFICATION",
@@ -60,6 +63,14 @@ mod tests {
             IntentSource::Orchestrator
         );
         assert_eq!(classify_user_text("fix the login bug"), IntentSource::Human);
+        assert_eq!(
+            classify_user_text("<ci-monitor-event>CI failed on PR #12</ci-monitor-event>"),
+            IntentSource::Orchestrator
+        );
+        assert_eq!(
+            classify_user_text("<create-pr-command>## Overview</create-pr-command>"),
+            IntentSource::Orchestrator
+        );
         assert_eq!(
             classify_user_text("Caveat: The messages below were generated"),
             IntentSource::Orchestrator
