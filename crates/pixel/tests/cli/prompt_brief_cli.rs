@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use pixel_setup::config::{BRIEF_WINDOW_COMMAND_MAX_MS, BRIEF_WINDOW_ENV, BRIEF_WINDOW_MAX_MS};
 use serde_json::{Value, json};
 
 use crate::support::{Scratch, daemons_serving, git, pixel_command};
@@ -74,6 +75,17 @@ fn indexed(tag: &str) -> Scratch {
     root
 }
 
+/// Hold the lock that serializes this module's timed calls, across threads
+/// (`cargo test`) and processes (nextest). Each brief races a wall-clock
+/// window; thirty of them at once on a loaded laptop ran every one out and
+/// left the hooks with nothing to assert on. A caller never takes it twice.
+fn timed() -> std::fs::File {
+    let lock =
+        std::fs::File::create(std::env::temp_dir().join("pixel-prompt-brief-cli.lock")).unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
 fn hook(root: &Path, provider: &str, prompt: &str, env: &[(&str, &str)]) -> Value {
     let payload = json!({
         "session_id": "brief-session",
@@ -85,6 +97,9 @@ fn hook(root: &Path, provider: &str, prompt: &str, env: &[(&str, &str)]) -> Valu
         command.env_remove("PIXEL_BRIEF");
         // These tests are about the packet; the region pack has its own.
         command.env("PIXEL_BRIEF_PACK", "0");
+        // The longest window a hook allows: these tests are about the packet,
+        // `the_brief_command_json_should_carry_the_window_*` about the window.
+        command.env(BRIEF_WINDOW_ENV, BRIEF_WINDOW_MAX_MS.to_string());
         for (key, value) in env {
             command.env(key, value);
         }
@@ -110,6 +125,7 @@ fn run_hook(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure(&mut command);
+    let _timed = timed();
     let mut child = command.spawn().unwrap();
     child
         .stdin
@@ -358,9 +374,11 @@ fn a_missing_graph_should_leave_the_text_evidence_and_build_nothing() {
 #[test]
 fn the_brief_command_should_print_the_brief_or_stay_silent() {
     let root = indexed("brief-cmd");
+    let _timed = timed();
     let output = pixel_command()
         .current_dir(&*root)
         .env("PIXEL_BRIEF_PACK", "0")
+        .env(BRIEF_WINDOW_ENV, BRIEF_WINDOW_COMMAND_MAX_MS.to_string())
         .args(["brief", RENAME, "--metrics", "off"])
         .output()
         .unwrap();
@@ -399,11 +417,15 @@ fn brief_json(root: &Path, prompt: &str, env: &[(&str, &str)]) -> Value {
         // The built-in probe steps would run here (`probe_ms`); a test that
         // wants them says so in `env`.
         .env("PIXEL_BRIEF_PROBES", "0")
+        .env(BRIEF_WINDOW_ENV, BRIEF_WINDOW_COMMAND_MAX_MS.to_string())
         .args(["brief", prompt, "--json", "--metrics", "off"]);
     for (key, value) in env {
         command.env(key, value);
     }
-    let output = command.output().unwrap();
+    let output = {
+        let _timed = timed();
+        command.output().unwrap()
+    };
     assert!(output.status.success(), "{output:?}");
     serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stdout)))
@@ -773,6 +795,7 @@ fn the_three_parts_of_an_oversized_brief_concatenate_to_the_whole_one() {
     );
 
     // Parts 3 and 2 start first and wait for part 1.
+    let _timed = timed();
     let three = spawn_part(&root, "claude", "3/3", &payload, &PADDED_PACKET);
     let two = spawn_part(&root, "claude", "2/3", &payload, &PADDED_PACKET);
     std::thread::sleep(Duration::from_millis(200));
@@ -841,6 +864,7 @@ fn codex_gets_its_brief_in_parts_of_at_most_9800_bytes() {
     let root = indexed("parts-codex");
     let payload = part_payload(&root);
     let env = [PADDED];
+    let _timed = timed();
     let handles: Vec<_> = ["3/3", "2/3", "1/3"]
         .into_iter()
         .map(|part| spawn_part(&root, "codex", part, &payload, &env))
@@ -863,6 +887,7 @@ fn codex_gets_its_brief_in_parts_of_at_most_9800_bytes() {
 #[test]
 fn a_part_that_never_gets_the_first_one_prints_nothing_and_exits_cleanly() {
     let root = indexed("parts-timeout");
+    let _timed = timed();
     let started = Instant::now();
     let output = spawn_part(&root, "claude", "2/3", &part_payload(&root), &[])
         .join()
@@ -892,6 +917,7 @@ fn parts_of_a_prompt_with_no_brief_print_nothing_much_and_do_not_wait() {
     // PIXEL_BRIEF=0: part 1 has no brief; it prints `{}` and stores an empty
     // one, so part 2 answers at once instead of waiting out its bound.
     let off = [("PIXEL_BRIEF", "0")];
+    let _timed = timed();
     let started = Instant::now();
     let one = spawn_part(&root, "claude", "1/3", &payload, &off)
         .join()
@@ -915,6 +941,7 @@ fn only_the_first_part_runs_the_task_ledger() {
     let root = indexed("parts-ledger");
     let payload = part_payload(&root);
     let env = [PADDED];
+    let timed_parts = timed();
     let handles: Vec<_> = ["2/3", "3/3", "1/3"]
         .into_iter()
         .map(|part| spawn_part(&root, "claude", part, &payload, &env))
@@ -922,6 +949,7 @@ fn only_the_first_part_runs_the_task_ledger() {
     for handle in handles {
         assert!(handle.join().unwrap().status.success());
     }
+    drop(timed_parts);
     // The ledger saw one prompt: the whole-brief hook on the same payload
     // leaves exactly as many task events behind as one part-1 run did.
     let after_parts = task_event_files(&root);
