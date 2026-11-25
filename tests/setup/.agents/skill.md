@@ -84,5 +84,4 @@ questions, pipelines, single-file edits, git-ignored or binary files: use
 ## Task gate
 
 On a host hook's task gate: `pixel task-state status TASK --json`; then
-`prepare`, `verify`, `review`, `finish` record evidence. A `🟩 Pixel · …`
-stderr line after a call: relay it once, as emitted.
+`prepare`, `verify`, `review`, `finish` record evidence.
