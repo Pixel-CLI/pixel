@@ -1899,9 +1899,9 @@ dependencies = [
 
 [[package]]
 name = "model2vec-rs"
-version = "0.4.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51020c65a18a206a4158aa354db49de672da7b1feab5b8213896bd54d03acb17"
+checksum = "38960779ee134c9011df6201b4da7e8223aecff2b76b2cf47f40abaee933027d"
 dependencies = [
  "anyhow",
  "half",
@@ -1910,7 +1910,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokenizers 0.21.4",
- "unicode-normalization",
+ "unicode-normalization-alignments",
  "unicode_categories",
  "ureq 2.12.1",
 ]
